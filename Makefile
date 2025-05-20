@@ -66,5 +66,5 @@ run_mpi: $(TARGET_MPI) $(DATA_FILE)
 
 clean:
 	@echo "Cleaning up..."
-	rm -f $(TARGET_SEQ) $(TARGET_MPI) $(TARGET_GENERATE) $(DATA_FILE) *.o core.*
+	rm -rf $(TARGET_SEQ) $(TARGET_MPI) $(TARGET_GENERATE) $(DATA_FILE) *.o core.* *.dSYM*/
 	@echo "Done."
