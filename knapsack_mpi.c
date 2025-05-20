@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stddef.h> // Para offsetof
 #include "knapsack_common.h"
 
 #define PRINT_MAX_ITEMS 10
@@ -52,11 +53,19 @@ int main(int argc, char *argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
-    if (num_procs < 2 && rank == 0) {
-        fprintf(stderr, "Este programa MPI requer pelo menos 2 processos (1 mestre, 1+ escravos).\n");
+    if (num_procs < 1) { // Precisa de pelo menos 1 processo (mestre, mesmo que não haja escravos para este modelo)
+        if (rank == 0) {
+             fprintf(stderr, "Este programa MPI requer pelo menos 1 processo.\n");
+        }
         MPI_Abort(MPI_COMM_WORLD, 1);
         return 1;
     }
+     if (num_procs < 2 && rank == 0) {
+        fprintf(stderr, "Aviso: Executando em modo \"sequencial\" com menos de 2 processos. O Mestre fará todo o trabalho se não houver escravos.\n");
+        // O código do mestre pode ser adaptado para rodar sequencialmente se num_procs == 1.
+        // Para este exemplo, vamos manter a lógica mestre/escravo e esperar pelo menos 2 para paralelismo real.
+    }
+
 
     // Criação do tipo MPI para a struct Item
     MPI_Datatype MPI_ITEM_TYPE;
@@ -93,16 +102,32 @@ int main(int argc, char *argv[]) {
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
 
-        fscanf(arquivo_entrada, "%d %d", &n_itens_global, &capacidade_mochila_global);
+        if (fscanf(arquivo_entrada, "%d %d", &n_itens_global, &capacidade_mochila_global) != 2) {
+             fprintf(stderr, "Mestre: Erro ao ler N e W do arquivo de entrada.\n");
+             fclose(arquivo_entrada);
+             MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+
         if (n_itens_global <= 0 || capacidade_mochila_global < 0 || n_itens_global > MAX_N_ITENS_CONST) {
-            fprintf(stderr, "Mestre: Parâmetros inválidos N=%d (max %d), W=%d\n", n_itens_global, MAX_N_ITENS_CONST, capacidade_mochila_global);
+            fprintf(stderr, "Mestre: Parâmetros inválidos N=%d (max %d suportado para buffer de tarefa %d), W=%d\\n",
+                    n_itens_global, MAX_N_ITENS_CONST, MAX_N_ITENS_CONST, capacidade_mochila_global);
             fclose(arquivo_entrada);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
 
         itens_ordenados_global = (Item *)malloc(n_itens_global * sizeof(Item));
+        if (itens_ordenados_global == NULL) {
+            perror("Mestre: Falha ao alocar memória para itens_ordenados_global");
+            fclose(arquivo_entrada);
+            MPI_Abort(MPI_COMM_WORLD,1);
+        }
         for (int i = 0; i < n_itens_global; i++) {
-            fscanf(arquivo_entrada, "%d %d", &itens_ordenados_global[i].valor, &itens_ordenados_global[i].peso);
+            if (fscanf(arquivo_entrada, "%d %d", &itens_ordenados_global[i].valor, &itens_ordenados_global[i].peso) != 2) {
+                fprintf(stderr, "Mestre: Erro ao ler item %d do arquivo de entrada.\n", i);
+                free(itens_ordenados_global);
+                fclose(arquivo_entrada);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
             itens_ordenados_global[i].indice_original = i;
             itens_ordenados_global[i].razao = (itens_ordenados_global[i].peso > 0) ?
                                            (double)itens_ordenados_global[i].valor / itens_ordenados_global[i].peso :
@@ -116,201 +141,211 @@ int main(int argc, char *argv[]) {
         printf("Total de processos: %d. Mestre: 1, Escravos: %d\n", num_procs, num_procs - 1);
 
         // Solução gulosa inicial pelo mestre
-        int *solucao_gulosa_temp = (int *)calloc(n_itens_global, sizeof(int));
+        int *solucao_gulosa_temp = (int *)calloc(n_itens_global, sizeof(int)); // Não estritamente necessário para o valor
+        if (solucao_gulosa_temp == NULL && n_itens_global > 0) {
+            perror("Mestre: Falha ao alocar solucao_gulosa_temp");
+            free(itens_ordenados_global);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
         int peso_guloso = 0;
         for(int i=0; i<n_itens_global; ++i) {
             if (peso_guloso + itens_ordenados_global[i].peso <= capacidade_mochila_global) {
                 peso_guloso += itens_ordenados_global[i].peso;
                 melhor_valor_global_mpi += itens_ordenados_global[i].valor;
-                // solucao_gulosa_temp[i] = 1; // Não precisamos guardar o caminho guloso globalmente ainda
             }
         }
-        free(solucao_gulosa_temp);
+        if (solucao_gulosa_temp) free(solucao_gulosa_temp);
         printf("Mestre: Melhor valor inicial (guloso): %d\n", melhor_valor_global_mpi);
         tempo_inicio_total = MPI_Wtime();
 
-        // Enviar dados iniciais para escravos
-        for (int i = 1; i < num_procs; i++) {
-            MPI_Send(&n_itens_global, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-            MPI_Send(&capacidade_mochila_global, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-            MPI_Send(itens_ordenados_global, n_itens_global, MPI_ITEM_TYPE, i, 0, MPI_COMM_WORLD);
-            MPI_Send(&melhor_valor_global_mpi, 1, MPI_INT, i, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD);
+        // Enviar dados iniciais para escravos (se houver escravos)
+        if (num_procs > 1) {
+            for (int i = 1; i < num_procs; i++) {
+                MPI_Send(&n_itens_global, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+                MPI_Send(&capacidade_mochila_global, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+                MPI_Send(itens_ordenados_global, n_itens_global, MPI_ITEM_TYPE, i, 0, MPI_COMM_WORLD);
+                MPI_Send(&melhor_valor_global_mpi, 1, MPI_INT, i, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD);
+            }
         }
 
-        // Geração e distribuição de tarefas iniciais
-        // O mestre divide o trabalho no primeiro nível da árvore BnB
         BnB_Tarefa tarefa;
         int tarefas_distribuidas = 0;
         int num_escravos_ativos = 0;
 
+        // Geração e distribuição de tarefas iniciais simples
         // Tarefa 1: Incluir o primeiro item (se possível)
-        if (n_itens_global > 0 && itens_ordenados_global[0].peso <= capacidade_mochila_global) {
+        if (n_itens_global > 0 && num_procs > 1 && itens_ordenados_global[0].peso <= capacidade_mochila_global) {
             if (tarefas_distribuidas < num_procs -1) {
-                tarefa.nivel_inicio = 1; // Começa a decidir sobre o item 1
+                tarefa.nivel_inicio = 1;
                 tarefa.peso_atual = itens_ordenados_global[0].peso;
                 tarefa.valor_atual = itens_ordenados_global[0].valor;
                 memset(tarefa.solucao_parcial_prefixo, 0, MAX_N_ITENS_CONST * sizeof(int));
-                tarefa.solucao_parcial_prefixo[0] = 1; // Item 0 incluído
+                tarefa.solucao_parcial_prefixo[0] = 1;
 
                 MPI_Send(&tarefa, sizeof(BnB_Tarefa), MPI_BYTE, tarefas_distribuidas + 1, TAG_TAREFA_DADOS, MPI_COMM_WORLD);
                 tarefas_distribuidas++;
                 num_escravos_ativos++;
-            } else { /* Adicionar à uma pilha de tarefas pendentes se houver mais tarefas que escravos */ }
+            }
         }
         // Tarefa 2: Não incluir o primeiro item
-        if (n_itens_global > 0) { // Sempre possível não incluir
+        if (n_itens_global > 0 && num_procs > 1) {
              if (tarefas_distribuidas < num_procs -1) {
-                tarefa.nivel_inicio = 1; // Começa a decidir sobre o item 1
+                tarefa.nivel_inicio = 1;
                 tarefa.peso_atual = 0;
                 tarefa.valor_atual = 0;
                 memset(tarefa.solucao_parcial_prefixo, 0, MAX_N_ITENS_CONST * sizeof(int));
-                tarefa.solucao_parcial_prefixo[0] = 0; // Item 0 não incluído
+                tarefa.solucao_parcial_prefixo[0] = 0;
 
                 MPI_Send(&tarefa, sizeof(BnB_Tarefa), MPI_BYTE, tarefas_distribuidas + 1, TAG_TAREFA_DADOS, MPI_COMM_WORLD);
                 tarefas_distribuidas++;
                 num_escravos_ativos++;
-             } else { /* Adicionar à pilha de tarefas */ }
+             }
         }
 
-        // Se não houver itens, ou menos tarefas geradas que escravos, alguns escravos podem ficar ociosos.
-        // O mestre precisa enviar TAG_SEM_TAREFAS para eles para que não fiquem esperando indefinidamente por uma tarefa.
-        // Ou, mais robustamente, o mestre deveria ter uma pilha de tarefas e os escravos pediriam tarefas.
-        // Para esta versão, se não houver tarefas suficientes, os escravos extras não receberão trabalho inicial.
-
-        // Loop de gerenciamento do mestre
-        int melhor_solucao_final[MAX_N_ITENS_CONST] = {0}; // Para armazenar o caminho da melhor solução
+        int melhor_solucao_final[MAX_N_ITENS_CONST];
+        if (n_itens_global > 0) memset(melhor_solucao_final, 0, n_itens_global * sizeof(int));
 
         MPI_Status status_msg;
         int valor_recebido;
-        int solucao_recebida[MAX_N_ITENS_CONST];
+        int solucao_recebida_buffer[MAX_N_ITENS_CONST];
+
 
         while(num_escravos_ativos > 0) {
+            // Usar MPI_Probe para checar se é uma solução ou um pedido de tarefa (não implementado aqui)
+            // Por ora, espera apenas soluções.
             MPI_Recv(&valor_recebido, 1, MPI_INT, MPI_ANY_SOURCE, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD, &status_msg);
             int escravo_fonte = status_msg.MPI_SOURCE;
-            MPI_Recv(solucao_recebida, n_itens_global, MPI_INT, escravo_fonte, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-            //printf("Mestre: Recebeu solução de valor %d do escravo %d\n", valor_recebido, escravo_fonte);
+            // Recebe o array da solução correspondente
+            MPI_Recv(solucao_recebida_buffer, n_itens_global, MPI_INT, escravo_fonte, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
             if (valor_recebido > melhor_valor_global_mpi) {
                 melhor_valor_global_mpi = valor_recebido;
-                memcpy(melhor_solucao_final, solucao_recebida, n_itens_global * sizeof(int));
+                if (n_itens_global > 0) {
+                    memcpy(melhor_solucao_final, solucao_recebida_buffer, n_itens_global * sizeof(int));
+                }
                 printf("Mestre: Novo melhor valor global: %d (do escravo %d)\n", melhor_valor_global_mpi, escravo_fonte);
                 // Notificar todos os outros escravos sobre o novo melhor valor
                 for (int i = 1; i < num_procs; i++) {
-                    //if (i != escravo_fonte) { // O escravo que enviou já sabe
-                        MPI_Send(&melhor_valor_global_mpi, 1, MPI_INT, i, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD);
-                    //}
+                     MPI_Send(&melhor_valor_global_mpi, 1, MPI_INT, i, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD);
                 }
             }
-            // Escravo terminou sua tarefa atribuída (seja ela qual for)
-            // Para um modelo simples, assumimos que cada escravo só recebe uma grande tarefa inicial.
-            // E após enviar sua melhor solução (ou nenhuma se não achou nada melhor), ele efetivamente terminou.
-            // Em um modelo mais dinâmico, ele pediria mais trabalho.
-            // Para este exemplo, vamos apenas decrementar ativos quando recebemos a TAG_NOVA_SOLUCAO
-            // (assumindo que o escravo envia isso ao final de seu trabalho).
             num_escravos_ativos--;
         }
 
+        // Se não houve escravos (num_procs == 1), o mestre deveria ter feito o trabalho.
+        // Esta lógica não está implementada aqui, assumimos num_procs >= 2 para paralelismo.
+        // Se num_procs == 1, o mestre calcula e imprime o resultado guloso.
 
-        // Enviar sinal de término para todos os escravos
-        for (int i = 1; i < num_procs; i++) {
-             // Se um escravo não recebeu uma tarefa inicial, ele pode estar esperando por TAG_TAREFA_DADOS
-             // Precisamos de um mecanismo mais robusto para escravos pedirem tarefas
-             // Por ora, vamos enviar TAG_TERMINAR. O escravo deve estar preparado para receber isso.
-            MPI_Send(NULL, 0, MPI_BYTE, i, TAG_TERMINAR, MPI_COMM_WORLD);
+        if (num_procs > 1) {
+            for (int i = 1; i < num_procs; i++) {
+                MPI_Send(NULL, 0, MPI_BYTE, i, TAG_TERMINAR, MPI_COMM_WORLD);
+            }
         }
 
         tempo_fim_total = MPI_Wtime();
         printf("\nValor máximo final na Mochila (MPI Branch and Bound): %d\n", melhor_valor_global_mpi);
-        // Imprimir itens selecionados (opcional, requer reconstrução a partir de melhor_solucao_final e itens_ordenados_global)
+        // Imprimir itens selecionados (se n_itens_global > 0 e solução foi encontrada/armazenada)
+        if (n_itens_global > 0 && melhor_valor_global_mpi > 0) { // Apenas imprime se uma solução válida foi encontrada
+            printf("Itens selecionados (índices originais, Peso, Valor):\n");
+            int peso_total_solucao = 0;
+            for (int i = 0; i < n_itens_global; i++) {
+                if (melhor_solucao_final[i] == 1) {
+                    printf("  - Item original %d: Peso = %d, Valor = %d (Razao %.2f)\n",
+                           itens_ordenados_global[i].indice_original, itens_ordenados_global[i].peso, itens_ordenados_global[i].valor, itens_ordenados_global[i].razao);
+                    peso_total_solucao += itens_ordenados_global[i].peso;
+                }
+            }
+            printf("Peso total da solução: %d (Capacidade: %d)\n", peso_total_solucao, capacidade_mochila_global);
+        }
         printf("Tempo de execução MPI (Mestre): %.3f ms\n", (tempo_fim_total - tempo_inicio_total) * 1000.0);
 
-        free(itens_ordenados_global);
+        if (itens_ordenados_global) free(itens_ordenados_global);
 
-    } else { // Código do Escravo
+    } else { // Código do Escravo (rank > 0)
         int n_local, capacidade_local;
-        Item *itens_local;
-        int melhor_valor_escravo;
+        Item *itens_local = NULL;
+        int melhor_valor_escravo_atualizado; // Melhor valor conhecido pelo escravo, atualizado pelo mestre
 
         MPI_Recv(&n_local, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         MPI_Recv(&capacidade_local, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        itens_local = (Item *)malloc(n_local * sizeof(Item));
+        if (n_local > 0) {
+             itens_local = (Item *)malloc(n_local * sizeof(Item));
+             if(itens_local == NULL) { MPI_Abort(MPI_COMM_WORLD, 2); }
+        }
         MPI_Recv(itens_local, n_local, MPI_ITEM_TYPE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(&melhor_valor_escravo, 1, MPI_INT, 0, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-        //printf("Escravo %d: Recebeu dados iniciais. N=%d, W=%d, MelhorValorInicial=%d\n", rank, n_local, capacidade_local, melhor_valor_escravo);
+        MPI_Recv(&melhor_valor_escravo_atualizado, 1, MPI_INT, 0, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
         BnB_Tarefa tarefa_recebida;
         MPI_Status status_tarefa;
-        // Tenta receber uma tarefa. Se o mestre não tiver uma para este escravo, ele pode receber TAG_TERMINAR.
         MPI_Recv(&tarefa_recebida, sizeof(BnB_Tarefa), MPI_BYTE, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status_tarefa);
 
         if (status_tarefa.MPI_TAG == TAG_TAREFA_DADOS) {
-            //printf("Escravo %d: Recebeu tarefa. Nível %d, Peso %d, Valor %d\n", rank, tarefa_recebida.nivel_inicio, tarefa_recebida.peso_atual, tarefa_recebida.valor_atual);
-
             int *solucao_atual_escravo = (int *)calloc(n_local, sizeof(int));
-            int *melhor_solucao_escravo_local = (int *)calloc(n_local, sizeof(int));
+            int *melhor_solucao_para_esta_tarefa = (int *)calloc(n_local, sizeof(int));
+            if ((solucao_atual_escravo == NULL || melhor_solucao_para_esta_tarefa == NULL) && n_local > 0) {
+                 if(solucao_atual_escravo) free(solucao_atual_escravo);
+                 if(melhor_solucao_para_esta_tarefa) free(melhor_solucao_para_esta_tarefa);
+                 if(itens_local) free(itens_local);
+                 MPI_Abort(MPI_COMM_WORLD, 3);
+            }
+            
+            // O valor inicial para melhor_valor_escravo_atualizado (que é passado para a função recursiva)
+            // é o valor atualizado que o escravo tem do mestre.
+            // A função recursiva tentará melhorar este valor.
 
-            // Copia o prefixo da solução para o array de solução atual do escravo
             for(int i=0; i < tarefa_recebida.nivel_inicio; ++i) {
                 solucao_atual_escravo[i] = tarefa_recebida.solucao_parcial_prefixo[i];
             }
 
-            // Inicia o BnB para o subproblema atribuído
+            // O valor inicial para melhor_valor_local_escravo na função recursiva
+            // será o `melhor_valor_escravo_atualizado` recebido do mestre.
+            // Se a exploração desta tarefa encontrar algo melhor que isso, será atualizado.
+            // O valor inicial da tarefa (tarefa_recebida.valor_atual) já está considerado ao iniciar
+            // a recursão. A melhor_solucao_para_esta_tarefa será preenchida dentro da recursão
+            // se um valor melhor que melhor_valor_escravo_atualizado for encontrado.
+            if (n_local > 0) { 
+                 // Inicializa melhor_solucao_para_esta_tarefa com o prefixo da tarefa,
+                 // pois este é o ponto de partida da exploração do escravo.
+                 memcpy(melhor_solucao_para_esta_tarefa, solucao_atual_escravo, n_local * sizeof(int));
+            }
+
+
             escravo_branch_and_bound_recursivo(tarefa_recebida.nivel_inicio,
                                                tarefa_recebida.peso_atual,
                                                tarefa_recebida.valor_atual,
                                                itens_local, n_local, capacidade_local,
-                                               &melhor_valor_escravo, // Passa o melhor valor conhecido pelo escravo
-                                               solucao_atual_escravo, rank, melhor_solucao_escravo_local);
+                                               &melhor_valor_escravo_atualizado,
+                                               solucao_atual_escravo, rank, melhor_solucao_para_esta_tarefa);
 
-            // Ao final da sua exploração, o escravo envia seu melhor resultado encontrado para o mestre.
-            // O escravo_branch_and_bound_recursivo já deve ter atualizado melhor_valor_escravo e melhor_solucao_escravo_local
-            // se encontrou algo melhor que o valor inicial/atualizações.
-            // Se não encontrou nada melhor, envia o valor que tinha (que pode ser o inicial guloso).
-            MPI_Send(&melhor_valor_escravo, 1, MPI_INT, 0, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD);
-            MPI_Send(melhor_solucao_escravo_local, n_local, MPI_INT, 0, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD);
-            //printf("Escravo %d: Terminou sua tarefa e enviou resultado %d.\n", rank, melhor_valor_escravo);
+            // Após a exploração, melhor_valor_escravo_atualizado contém o melhor valor que este escravo
+            // pôde encontrar ou confirmar para sua sub-árvore, considerando as atualizações do mestre.
+            // E melhor_solucao_para_esta_tarefa contém o caminho.
+            MPI_Send(&melhor_valor_escravo_atualizado, 1, MPI_INT, 0, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD);
+            MPI_Send(melhor_solucao_para_esta_tarefa, n_local, MPI_INT, 0, TAG_NOVA_SOLUCAO, MPI_COMM_WORLD);
 
-            free(solucao_atual_escravo);
-            free(melhor_solucao_escravo_local);
+            if (solucao_atual_escravo) free(solucao_atual_escravo);
+            if (melhor_solucao_para_esta_tarefa) free(melhor_solucao_para_esta_tarefa);
 
         } else if (status_tarefa.MPI_TAG == TAG_TERMINAR) {
-            //printf("Escravo %d: Recebeu TAG_TERMINAR sem receber tarefa.\n", rank);
-        } else {
-            //printf("Escravo %d: Recebeu tag inesperada %d ao esperar tarefa.\n", rank, status_tarefa.MPI_TAG);
+            // Não recebeu tarefa, apenas sinal para terminar.
         }
 
-        // O escravo pode precisar de um loop para continuar recebendo atualizações ou o sinal de término final
-        // se o modelo de trabalho fosse mais dinâmico. Para este modelo simples, ele faz uma tarefa e termina.
-        // Um loop de escuta para TAG_TERMINAR ou TAG_ATUALIZACAO_MELHOR_VALOR seria necessário aqui
-        // se o escravo pudesse receber múltiplas tarefas ou se o mestre continuasse enviando atualizações
-        // mesmo após o escravo ter enviado seu resultado final.
-        // Para simplificar, o escravo finaliza após sua única tarefa (ou se não recebeu nenhuma).
-        // O mestre deve garantir que o sinal de término é o último.
+        // Aguarda o sinal de término final do mestre, caso ainda não o tenha recebido como a primeira mensagem.
+        // Se recebeu TAG_TAREFA_DADOS, precisa deste Recv.
+        // Se recebeu TAG_TERMINAR no Recv anterior, este Recv também pegará um TAG_TERMINAR (o mestre envia para todos).
+        // Mas isso pode causar deadlock se o mestre já enviou TAG_TERMINAR e o escravo recebeu e saiu do if/else.
+        // A lógica de terminação precisa ser robusta.
+        // Um escravo que recebeu TAG_TAREFA_DADOS e processou, deve esperar pelo TAG_TERMINAR final.
+        // Um escravo que recebeu TAG_TERMINAR inicialmente, já pode ter saído.
+        // A forma mais simples é que todo escravo espere uma última mensagem TAG_TERMINAR.
 
-        MPI_Status status_final;
-        int dummy_buf; // Para MPI_Recv de TAG_TERMINAR se for apenas um sinal
-        // Loop para aguardar atualizações ou sinal de término final, caso o escravo ainda não tenha recebido.
-        // Isto é importante se o mestre envia atualizações e depois o término.
-        // No modelo atual, o escravo só faz uma tarefa. Ele já recebeu o término ou uma tarefa.
-        // Se recebeu tarefa, ele processou. O mestre espera a TAG_NOVA_SOLUCAO.
-        // Se o mestre enviasse TAG_TERMINAR depois disso, o escravo precisaria de outro Recv.
-        // Por ora, o escravo finaliza após enviar sua solução. O mestre coordena o término.
-        // Para garantir, adicionamos um Recv bloqueante para TAG_TERMINAR.
-
-        // Se o escravo recebeu e processou uma tarefa, ele já enviou TAG_NOVA_SOLUCAO.
-        // Ele ainda precisa receber o sinal final de TAG_TERMINAR do mestre.
-        if (status_tarefa.MPI_TAG == TAG_TAREFA_DADOS) { // Se processou uma tarefa
-            // Ele pode receber atualizações de melhor valor enquanto processa (não implementado com Iprobe aqui)
-            // Depois de enviar sua solução, espera o sinal final de término.
-            MPI_Recv(NULL, 0, MPI_BYTE, 0, TAG_TERMINAR, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //printf("Escravo %d: Recebeu sinal final de término.\n", rank);
+        if (status_tarefa.MPI_TAG != TAG_TERMINAR) { // Se não recebeu terminar como primeira mensagem
+             MPI_Recv(NULL, 0, MPI_BYTE, 0, TAG_TERMINAR, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
 
-
-        free(itens_local);
+        if(itens_local) free(itens_local);
     }
 
     MPI_Type_free(&MPI_ITEM_TYPE);
@@ -321,7 +356,6 @@ int main(int argc, char *argv[]) {
 
 /**
  * @brief (Escravo) Calcula um limite superior (upper bound) para o valor máximo que pode ser obtido a partir do nível atual.
- * Cópia da função sequencial, adaptada para o contexto do escravo se necessário (nenhuma mudança aqui).
  */
 static double calcular_limite_superior_mpi(int nivel, int peso_acumulado, int valor_acumulado,
                                            const Item itens[], int n_itens, int capacidade_maxima) {
@@ -342,36 +376,48 @@ static double calcular_limite_superior_mpi(int nivel, int peso_acumulado, int va
 
 /**
  * @brief (Escravo) Função recursiva principal para o algoritmo Branch and Bound, executada pelo escravo.
- * Modificada para:
- * 1. Usar `melhor_valor_local_escravo` para suas próprias decisões de poda.
- * 2. Não envia diretamente ao mestre a cada melhora local, mas atualiza `melhor_solucao_escravo`.
- *    O resultado final da exploração da sua sub-árvore é enviado uma vez ao mestre.
- *    (Nota: uma estratégia mais dinâmica enviaria melhorias parciais ao mestre imediatamente).
- *    Para esta versão, vamos atualizar melhor_valor_local_escravo e melhor_solucao_escravo,
- *    e o escravo enviará estes ao mestre *após* sua sub-árvore ser totalmente explorada.
  */
 static void escravo_branch_and_bound_recursivo(int nivel, int peso_atual, int valor_atual,
                                                const Item itens_ordenados[], int n_itens, int capacidade_mochila,
-                                               int *melhor_valor_local_escravo, int solucao_atual_escravo[],
-                                               int rank_escravo, int melhor_solucao_escravo[]) {
+                                               int *melhor_valor_global_conhecido_pelo_escravo,
+                                               int solucao_atual_escravo[],
+                                               int rank_escravo, int melhor_solucao_da_subarvore_escravo[]) {
 
-    // O escravo também pode receber atualizações do mestre sobre o melhor_valor_global.
-    // Para uma implementação simples, ele usa o `melhor_valor_local_escravo` que foi inicializado
-    // e atualizado na última vez que ouviu do mestre.
-    // Uma implementação mais avançada usaria MPI_Iprobe aqui para checar mensagens do mestre.
-
-    if (valor_atual > *melhor_valor_local_escravo) {
-        *melhor_valor_local_escravo = valor_atual;
-        memcpy(melhor_solucao_escravo, solucao_atual_escravo, n_itens * sizeof(int));
-        //printf("Escravo %d: Novo melhor local: %d (nível %d)\n", rank_escravo, *melhor_valor_local_escravo, nivel);
+    int flag_msg_pendente = 0;
+    MPI_Status status_iprobe;
+    // Verifica se há uma atualização do melhor valor global enviada pelo mestre
+    MPI_Iprobe(0, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD, &flag_msg_pendente, &status_iprobe);
+    if (flag_msg_pendente) {
+        int novo_melhor_valor_global_recebido;
+        MPI_Recv(&novo_melhor_valor_global_recebido, 1, MPI_INT, 0, TAG_ATUALIZACAO_MELHOR_VALOR, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (novo_melhor_valor_global_recebido > *melhor_valor_global_conhecido_pelo_escravo) {
+            *melhor_valor_global_conhecido_pelo_escravo = novo_melhor_valor_global_recebido;
+            // printf("Escravo %d: Atualizou melhor_valor_global_conhecido para %d via Iprobe (nível %d)\n",
+            //        rank_escravo, *melhor_valor_global_conhecido_pelo_escravo, nivel);
+        }
     }
+
+    // Atualiza a melhor solução encontrada *nesta subárvore específica pelo escravo*
+    // se o valor_atual for melhor que o que ele já tem para *esta subárvore*.
+    // No entanto, a poda global usa `melhor_valor_global_conhecido_pelo_escravo`.
+    // Se `valor_atual` for maior que `melhor_valor_global_conhecido_pelo_escravo`, ele se torna um candidato a ser o novo melhor global.
+    if (valor_atual > *melhor_valor_global_conhecido_pelo_escravo) {
+        *melhor_valor_global_conhecido_pelo_escravo = valor_atual; // Esta linha é crucial. O escravo atualiza seu conhecimento do melhor global.
+        memcpy(melhor_solucao_da_subarvore_escravo, solucao_atual_escravo, n_itens * sizeof(int));
+    }
+    // Se apenas valor_atual > valor da melhor_solucao_da_subarvore_escravo, mas não > melhor_valor_global_conhecido_pelo_escravo,
+    // ainda assim atualizamos a melhor_solucao_da_subarvore_escravo para refletir o melhor desta exploração.
+    // O jeito mais simples é ter uma variável separada para o melhor valor *desta subárvore*.
+    // Para manter simples, o `melhor_solucao_da_subarvore_escravo` será associado ao `melhor_valor_global_conhecido_pelo_escravo`
+    // se este escravo o melhorou.
+
 
     if (nivel == n_itens) {
         return;
     }
 
     double limite_sup = calcular_limite_superior_mpi(nivel, peso_atual, valor_atual, itens_ordenados, n_itens, capacidade_mochila);
-    if (limite_sup <= (double)(*melhor_valor_local_escravo)) {
+    if (limite_sup <= (double)(*melhor_valor_global_conhecido_pelo_escravo)) {
         return;
     }
 
@@ -382,21 +428,20 @@ static void escravo_branch_and_bound_recursivo(int nivel, int peso_atual, int va
                                            peso_atual + itens_ordenados[nivel].peso,
                                            valor_atual + itens_ordenados[nivel].valor,
                                            itens_ordenados, n_itens, capacidade_mochila,
-                                           melhor_valor_local_escravo, solucao_atual_escravo,
-                                           rank_escravo, melhor_solucao_escravo);
+                                           melhor_valor_global_conhecido_pelo_escravo, solucao_atual_escravo,
+                                           rank_escravo, melhor_solucao_da_subarvore_escravo);
     }
 
     // Ramo 2: Não incluir o item do nível atual
-    // Verifica o limite ANTES de fazer a chamada recursiva para este ramo
     double limite_sup_sem_item_atual = calcular_limite_superior_mpi(nivel + 1, peso_atual, valor_atual, itens_ordenados, n_itens, capacidade_mochila);
-    if (limite_sup_sem_item_atual > (double)(*melhor_valor_local_escravo)) {
+    if (limite_sup_sem_item_atual > (double)(*melhor_valor_global_conhecido_pelo_escravo)) {
         solucao_atual_escravo[nivel] = 0;
         escravo_branch_and_bound_recursivo(nivel + 1,
                                            peso_atual,
                                            valor_atual,
                                            itens_ordenados, n_itens, capacidade_mochila,
-                                           melhor_valor_local_escravo, solucao_atual_escravo,
-                                           rank_escravo, melhor_solucao_escravo);
+                                           melhor_valor_global_conhecido_pelo_escravo, solucao_atual_escravo,
+                                           rank_escravo, melhor_solucao_da_subarvore_escravo);
     }
-    solucao_atual_escravo[nivel] = 0; // Backtrack (limpa para o nível pai na pilha de recursão)
+    solucao_atual_escravo[nivel] = 0;
 }
