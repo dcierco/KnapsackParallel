@@ -270,8 +270,8 @@ int main(int argc, char *argv[]) {
     int valor_verificado_solucao = 0;
     for (int i = 0; i < n_itens; i++) {
         if (melhor_solucao[i] == 1) { // Se o item i (na lista ordenada) foi selecionado
-            printf("  - Item original %d: Peso = %d, Valor = %d (Razao %.2f)\n",
-                   itens[i].indice_original, itens[i].peso, itens[i].valor, itens[i].razao);
+            // printf("  - Item original %d: Peso = %d, Valor = %d (Razao %.2f)\n",
+            //        itens[i].indice_original, itens[i].peso, itens[i].valor, itens[i].razao);
             peso_total_solucao += itens[i].peso;
             valor_verificado_solucao += itens[i].valor;
         }

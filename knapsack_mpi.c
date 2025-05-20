@@ -251,8 +251,8 @@ int main(int argc, char *argv[]) {
             int peso_total_solucao = 0;
             for (int i = 0; i < n_itens_global; i++) {
                 if (melhor_solucao_final[i] == 1) {
-                    printf("  - Item original %d: Peso = %d, Valor = %d (Razao %.2f)\n",
-                           itens_ordenados_global[i].indice_original, itens_ordenados_global[i].peso, itens_ordenados_global[i].valor, itens_ordenados_global[i].razao);
+                    // printf("  - Item original %d: Peso = %d, Valor = %d (Razao %.2f)\n",
+                           //itens_ordenados_global[i].indice_original, itens_ordenados_global[i].peso, itens_ordenados_global[i].valor, itens_ordenados_global[i].razao);
                     peso_total_solucao += itens_ordenados_global[i].peso;
                 }
             }
@@ -290,7 +290,7 @@ int main(int argc, char *argv[]) {
                  if(itens_local) free(itens_local);
                  MPI_Abort(MPI_COMM_WORLD, 3);
             }
-            
+
             // O valor inicial para melhor_valor_escravo_atualizado (que é passado para a função recursiva)
             // é o valor atualizado que o escravo tem do mestre.
             // A função recursiva tentará melhorar este valor.
@@ -305,7 +305,7 @@ int main(int argc, char *argv[]) {
             // O valor inicial da tarefa (tarefa_recebida.valor_atual) já está considerado ao iniciar
             // a recursão. A melhor_solucao_para_esta_tarefa será preenchida dentro da recursão
             // se um valor melhor que melhor_valor_escravo_atualizado for encontrado.
-            if (n_local > 0) { 
+            if (n_local > 0) {
                  // Inicializa melhor_solucao_para_esta_tarefa com o prefixo da tarefa,
                  // pois este é o ponto de partida da exploração do escravo.
                  memcpy(melhor_solucao_para_esta_tarefa, solucao_atual_escravo, n_local * sizeof(int));

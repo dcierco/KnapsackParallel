@@ -22,10 +22,10 @@ COMMON_HEADER = knapsack_common.h
 DATA_FILE ?= knapsack_data.txt
 # Parameters for data generation (can be overridden on the command line for make generate_data)
 # Example: make generate_data NUM_ITEMS=50 CAPACITY=100
-NUM_ITEMS ?= 1000
-CAPACITY ?= 20000
-MAX_WEIGHT ?= 500
-MAX_VALUE ?= 750
+NUM_ITEMS ?= 5000
+CAPACITY ?= 500000
+MAX_PESO ?= 7000
+MAX_VALOR ?= 1000
 
 
 .PHONY: all clean run_sequential run_mpi generate_data
