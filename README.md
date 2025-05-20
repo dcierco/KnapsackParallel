@@ -1,4 +1,3 @@
-```markdown
 # Solucionador do Problema da Mochila (Knapsack) com MPI
 
 Este projeto implementa e compara duas abordagens para resolver o problema da mochila 0/1:
