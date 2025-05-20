@@ -1,0 +1,21 @@
+# Arquivos de dados gerados
+knapsack_data.txt
+
+# Executáveis compilados
+knapsack_sequential
+knapsack_mpi
+generate_input
+
+# Arquivos objeto
+*.o
+*.dSYM*/
+
+# Arquivos de core dump
+core
+core.*
+*.stackdump
+
+# Arquivos temporários de alguns editores
+*~
+*.swp
+*.swo
