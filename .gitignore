@@ -10,6 +10,9 @@ generate_input
 *.o
 *.dSYM*/
 
+# Arquivos input de txt
+knapsack_*.txt
+
 # Arquivos de core dump
 core
 core.*
