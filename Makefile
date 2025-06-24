@@ -1,10 +1,21 @@
 # Compiler and flags
-CC = /opt/homebrew/bin/gcc-15
+# Detect if we're on macOS (Homebrew) or Linux cluster
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS with Homebrew
+    CC = /opt/homebrew/bin/gcc-15
+    MPI_INCLUDE = -I/opt/homebrew/Cellar/open-mpi/5.0.7/include
+    MPI_LIBDIR = -L/opt/homebrew/Cellar/open-mpi/5.0.7/lib
+    MPI_LIBS = -lmpi
+else
+    # Linux cluster - use system defaults
+    CC = gcc
+    MPI_INCLUDE = 
+    MPI_LIBDIR = 
+    MPI_LIBS = 
+endif
+
 MPICC = mpicc
-# MPI+OpenMP hybrid needs gcc instead of clang for OpenMP support
-MPI_INCLUDE = -I/opt/homebrew/Cellar/open-mpi/5.0.7/include
-MPI_LIBDIR = -L/opt/homebrew/Cellar/open-mpi/5.0.7/lib
-MPI_LIBS = -lmpi
 CFLAGS = -Wall -g -O2 -std=c99 -D_GNU_SOURCE # Using GNU_SOURCE for snprintf and other functions
 OPENMP_FLAGS = -fopenmp
 
@@ -50,7 +61,13 @@ $(TARGET_MPI_DC): $(SRC_MPI_DC) $(COMMON_HEADER)
 	$(MPICC) $(CFLAGS) -o $@ $(SRC_MPI_DC)
 
 $(TARGET_HYBRID): $(SRC_HYBRID) $(COMMON_HEADER)
+ifeq ($(UNAME_S),Darwin)
+	# macOS: Use GCC directly with MPI flags since mpicc uses clang
 	$(CC) $(CFLAGS) $(OPENMP_FLAGS) $(MPI_INCLUDE) $(MPI_LIBDIR) $(MPI_LIBS) -o $@ $(SRC_HYBRID)
+else
+	# Linux: Use mpicc which should support OpenMP
+	$(MPICC) $(CFLAGS) $(OPENMP_FLAGS) -o $@ $(SRC_HYBRID)
+endif
 
 $(TARGET_GENERATE): $(SRC_GENERATE)
 	$(CC) $(CFLAGS) -o $@ $(SRC_GENERATE)

@@ -180,6 +180,17 @@ calculate_nodes() {
     echo $(((processes + max_procs_per_node - 1) / max_procs_per_node))
 }
 
+# Check if modules are needed (uncomment and adjust if required)
+# log "Loading required modules..."
+# module purge
+# module load gcc/11.2.0 || module load gcc
+# module load openmpi/4.1.1 || module load openmpi
+# log "Loaded modules: $(module list 2>&1)"
+
+log "Using system compilers: gcc and mpicc"
+log "GCC version: $(gcc --version | head -1)"
+log "MPI version: $(mpicc --version | head -1)"
+
 # Main benchmark execution
 log "${YELLOW}Starting SLURM Knapsack Benchmark for LAD Atlantica${NC}"
 log "Strong scalability: Fixed problem size $STRONG_SCALABILITY_SIZE items"
@@ -188,9 +199,18 @@ log "Process counts: 2-16"
 log "Timeout: $TIMEOUT seconds per test"
 log "SLURM Partition: ${SLURM_PARTITION:-default}"
 
-# Ensure all executables are built
-log "Building all implementations..."
+# Clean and rebuild to ensure proper linking
+log "Cleaning and building all implementations..."
+make clean >> "$LOG_FILE" 2>&1
 make all >> "$LOG_FILE" 2>&1
+
+# Check if build was successful
+if [ $? -ne 0 ]; then
+    log "${RED}Build failed! Check if modules are loaded correctly${NC}"
+    log "Available modules:"
+    module avail 2>> "$LOG_FILE"
+    exit 1
+fi
 
 # Generate baseline test data for strong scalability
 log "${YELLOW}=== STRONG SCALABILITY TESTS ===${NC}"
