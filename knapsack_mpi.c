@@ -114,52 +114,36 @@ static void generate_balanced_tasks(const Item itens[], int n_itens, int capacid
     // Debug: printf("Geradas %d tarefas balanceadas\n", *task_count);
 }
 
-// Versão worker otimizada do branch and bound
-static int branch_and_bound_worker_optimized(int nivel, int peso_atual, int valor_atual,
-                                           const Item itens[], int n_itens, int capacidade,
-                                           int *melhor_valor, int solucao_atual[], int melhor_solucao[],
-                                           int limite_nos, int *nos_explorados) {
-    
-    // Limita o número de nós explorados por tarefa para balanceamento
-    if (*nos_explorados >= limite_nos) {
-        return *nos_explorados;
-    }
+// Versão worker de força bruta
+static int brute_force_worker(int nivel, int peso_atual, int valor_atual,
+                             const Item itens[], int n_itens, int capacidade,
+                             int *melhor_valor, int solucao_atual[], int melhor_solucao[],
+                             int *nos_explorados) {
     (*nos_explorados)++;
     
-    // Atualiza melhor solução se necessário
-    if (valor_atual > *melhor_valor) {
-        *melhor_valor = valor_atual;
-        memcpy(melhor_solucao, solucao_atual, n_itens * sizeof(int));
-    }
-    
-    // Caso base
+    // Caso base: todos os itens foram considerados
     if (nivel == n_itens) {
+        // Atualiza melhor solução se necessário
+        if (valor_atual > *melhor_valor) {
+            *melhor_valor = valor_atual;
+            memcpy(melhor_solucao, solucao_atual, n_itens * sizeof(int));
+        }
         return *nos_explorados;
-    }
-    
-    // Poda usando limite superior
-    double limite = calcular_limite_superior(nivel, peso_atual, valor_atual, itens, n_itens, capacidade);
-    if (limite <= (double)(*melhor_valor)) {
-        return *nos_explorados;
-    }
-    
-    // Explora ramo incluindo item atual
-    if (peso_atual + itens[nivel].peso <= capacidade) {
-        solucao_atual[nivel] = 1;
-        branch_and_bound_worker_optimized(nivel + 1, peso_atual + itens[nivel].peso,
-                                         valor_atual + itens[nivel].valor,
-                                         itens, n_itens, capacidade, melhor_valor, 
-                                         solucao_atual, melhor_solucao, limite_nos, nos_explorados);
-        if (*nos_explorados >= limite_nos) return *nos_explorados;
     }
     
     // Explora ramo não incluindo item atual
-    double limite_sem = calcular_limite_superior(nivel + 1, peso_atual, valor_atual, itens, n_itens, capacidade);
-    if (limite_sem > (double)(*melhor_valor)) {
-        solucao_atual[nivel] = 0;
-        branch_and_bound_worker_optimized(nivel + 1, peso_atual, valor_atual,
-                                         itens, n_itens, capacidade, melhor_valor, 
-                                         solucao_atual, melhor_solucao, limite_nos, nos_explorados);
+    solucao_atual[nivel] = 0;
+    brute_force_worker(nivel + 1, peso_atual, valor_atual,
+                      itens, n_itens, capacidade, melhor_valor, 
+                      solucao_atual, melhor_solucao, nos_explorados);
+    
+    // Explora ramo incluindo item atual (se couber)
+    if (peso_atual + itens[nivel].peso <= capacidade) {
+        solucao_atual[nivel] = 1;
+        brute_force_worker(nivel + 1, peso_atual + itens[nivel].peso,
+                          valor_atual + itens[nivel].valor,
+                          itens, n_itens, capacidade, melhor_valor, 
+                          solucao_atual, melhor_solucao, nos_explorados);
     }
     
     solucao_atual[nivel] = 0;  // Backtrack
@@ -188,7 +172,7 @@ int main(int argc, char *argv[]) {
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
 
-        // Debug: printf("=== Solucionador MPI Knapsack (Branch and Bound Mestre-Escravo) ===\n");
+        // Debug: printf("=== Solucionador MPI Knapsack (Força Bruta Mestre-Escravo) ===\n");
         // Debug: printf("Processos: %d (1 mestre + %d workers)\n", num_procs, num_procs - 1);
 
         // Lê dados do arquivo
@@ -229,12 +213,9 @@ int main(int argc, char *argv[]) {
         }
         fclose(arquivo);
 
-        // Ordena itens por razão valor/peso
-        qsort(itens, n_itens, sizeof(Item), comparar_itens);
-
-        // Calcula solução gulosa inicial
-        int valor_guloso = calcular_solucao_gulosa_inicial(itens, n_itens, capacidade, NULL);
-        // Debug: printf("Valor guloso inicial: %d\n", valor_guloso);
+        // Para força bruta, não precisamos ordenar os itens
+        // Inicializa com valor 0
+        int valor_guloso = 0;
 
         // Gera tarefas balanceadas - mais tarefas para datasets maiores
         int tasks_per_worker = 8;
@@ -268,9 +249,6 @@ int main(int argc, char *argv[]) {
         int workers_ativos = 0;
         int melhor_valor_global = valor_guloso;
         int *melhor_solucao_global = calloc(n_itens, sizeof(int));
-        
-        // Calcula solução gulosa completa
-        calcular_solucao_gulosa_inicial(itens, n_itens, capacidade, melhor_solucao_global);
 
         // Envia tarefas iniciais
         for (int i = 1; i < num_procs && task_idx < task_count; i++) {
@@ -381,11 +359,7 @@ int main(int argc, char *argv[]) {
         int *melhor_solucao = calloc(n_itens, sizeof(int));
         int melhor_valor_local = 0;
 
-        // Calcula limite de nós por tarefa para balanceamento baseado no tamanho do problema
-        int limite_nos_por_tarefa = 1000;
-        if (n_itens > 5000) limite_nos_por_tarefa = 5000;
-        if (n_itens > 15000) limite_nos_por_tarefa = 10000;
-        if (n_itens > 30000) limite_nos_por_tarefa = 20000;
+        // Sem limites - força bruta completa para escalabilidade real
         
         while (1) {
             MPI_Status status;
@@ -431,11 +405,11 @@ int main(int argc, char *argv[]) {
                     memcpy(melhor_solucao, solucao_atual, n_itens * sizeof(int));
                 }
 
-                // Resolve subproblema com limite de nós
+                // Resolve subproblema com limite de nós usando força bruta
                 int nos_explorados = 0;
-                branch_and_bound_worker_optimized(task.nivel_inicio, task.peso_atual, task.valor_atual,
-                                               itens, n_itens, capacidade, &melhor_valor_local,
-                                               solucao_atual, melhor_solucao, limite_nos_por_tarefa, &nos_explorados);
+                brute_force_worker(task.nivel_inicio, task.peso_atual, task.valor_atual,
+                                  itens, n_itens, capacidade, &melhor_valor_local,
+                                  solucao_atual, melhor_solucao, &nos_explorados);
 
                 // Envia resultado
                 int result_data[3] = {melhor_valor_local, rank, nos_explorados};

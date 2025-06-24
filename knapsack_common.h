@@ -3,6 +3,9 @@
 
 #include <stdlib.h> // Para qsort
 #include <string.h> // Para memset e memcpy
+#include <stdio.h>  // Para FILE, printf, snprintf, etc.
+#include <time.h>   // Para struct timespec
+#include <errno.h>  // Para error handling
 
 /**
  * @file knapsack_common.h
@@ -13,9 +16,10 @@
  *
  * Principais funcionalidades:
  * - Estrutura Item com razão valor/peso
- * - Algoritmo Branch and Bound recursivo otimizado
- * - Cálculo de limites superiores para poda
- * - Solução gulosa inicial para acelerar convergência
+ * - Funções de I/O e inicialização compartilhadas
+ * - Cálculo de estatísticas e verificação de soluções
+ * - Utilitários de timing e formatação
+ * - Algoritmo Branch and Bound recursivo otimizado (legacy)
  * - Funções de comparação para ordenação de itens
  */
 
@@ -39,6 +43,39 @@ typedef struct {
     double razao;       ///< A razão valor/peso do item (valor por unidade de peso).
     int indice_original; ///< O índice original do item antes da ordenação.
 } Item;
+
+/**
+ * @struct KnapsackProblem
+ * @brief Estrutura que encapsula um problema completo da mochila.
+ *
+ * Contém todos os dados necessários para resolver o problema:
+ * - Array de itens com suas propriedades
+ * - Parâmetros do problema (número de itens e capacidade)
+ * - Arrays de trabalho para soluções
+ */
+typedef struct {
+    Item *itens;              ///< Array de itens do problema
+    int n_itens;              ///< Número total de itens
+    int capacidade;           ///< Capacidade máxima da mochila
+    int *solucao_atual;       ///< Array de trabalho para solução sendo construída
+    int *melhor_solucao;      ///< Array com a melhor solução encontrada
+} KnapsackProblem;
+
+/**
+ * @struct SolutionStats
+ * @brief Estrutura para estatísticas da solução encontrada.
+ *
+ * Consolida todas as métricas importantes da execução:
+ * - Qualidade da solução (valor, peso, itens)
+ * - Métricas de performance (tempo, nós explorados)
+ */
+typedef struct {
+    int valor_final;          ///< Valor total da melhor solução
+    int peso_total;           ///< Peso total da melhor solução
+    int itens_selecionados;   ///< Número de itens selecionados
+    double tempo_ms;          ///< Tempo de execução em milissegundos
+    long long nos_explorados; ///< Número de nós explorados (se aplicável)
+} SolutionStats;
 
 /**
  * @brief Calcula o máximo entre dois números inteiros.
@@ -73,7 +110,7 @@ static inline int max(int a, int b) {
  *         - Positivo: 'b' tem prioridade maior que 'a'
  *         - Zero: prioridades iguais
  */
-static int comparar_itens(const void *a, const void *b) {
+__attribute__((unused)) static int comparar_itens(const void *a, const void *b) {
     Item *item_a = (Item *)a;
     Item *item_b = (Item *)b;
 
@@ -114,7 +151,7 @@ static int comparar_itens(const void *a, const void *b) {
  * @param capacidade_maxima Capacidade máxima da mochila
  * @return double Limite superior (valor máximo teórico possível)
  */
-static inline double calcular_limite_superior(int nivel, int peso_acumulado, int valor_acumulado,
+__attribute__((unused)) static inline double calcular_limite_superior(int nivel, int peso_acumulado, int valor_acumulado,
                                               const Item itens[], int n_itens, int capacidade_maxima) {
     double limite_superior = (double)valor_acumulado;
     int peso_restante = capacidade_maxima - peso_acumulado;
@@ -156,7 +193,7 @@ static inline double calcular_limite_superior(int nivel, int peso_acumulado, int
  *                       Pode ser NULL se apenas o valor for necessário
  * @return int Valor total da solução gulosa (limite inferior)
  */
-static inline int calcular_solucao_gulosa_inicial(const Item itens_ordenados[], int n_itens,
+__attribute__((unused)) static inline int calcular_solucao_gulosa_inicial(const Item itens_ordenados[], int n_itens,
                                                   int capacidade_mochila, int solucao_gulosa[]) {
     int valor_total_guloso = 0;
     int peso_atual_guloso = 0;
@@ -206,7 +243,7 @@ static inline int calcular_solucao_gulosa_inicial(const Item itens_ordenados[], 
  * @param solucao_atual Array de trabalho para solução sendo construída
  * @param melhor_solucao Array de saída com a melhor solução encontrada
  */
-static inline void branch_and_bound_recursivo(int nivel, int peso_atual, int valor_atual,
+__attribute__((unused)) static inline void branch_and_bound_recursivo(int nivel, int peso_atual, int valor_atual,
                                               const Item itens_ordenados[], int n_itens, int capacidade_mochila,
                                               int *melhor_valor_global, int solucao_atual[], int melhor_solucao[]) {
     // Atualiza a melhor solução se o valor atual é melhor
@@ -252,6 +289,169 @@ static inline void branch_and_bound_recursivo(int nivel, int peso_atual, int val
 
     // Limpa a marcação para backtracking
     solucao_atual[nivel] = 0;
+}
+
+/**
+ * @brief Lê e inicializa um problema da mochila a partir de um arquivo.
+ *
+ * Função que encapsula toda a lógica de leitura de arquivo, validação
+ * de entrada e inicialização das estruturas de dados necessárias.
+ *
+ * @param filename Nome do arquivo de entrada
+ * @return KnapsackProblem* Ponteiro para estrutura inicializada ou NULL em caso de erro
+ */
+static inline KnapsackProblem* read_knapsack_problem(const char *filename) {
+    FILE *arquivo = fopen(filename, "r");
+    if (!arquivo) {
+        perror("Erro ao abrir o arquivo de entrada");
+        return NULL;
+    }
+
+    KnapsackProblem *problem = malloc(sizeof(KnapsackProblem));
+    if (!problem) {
+        perror("Erro ao alocar memória para o problema");
+        fclose(arquivo);
+        return NULL;
+    }
+
+    // Lê cabeçalho
+    if (fscanf(arquivo, "%d %d", &problem->n_itens, &problem->capacidade) != 2) {
+        fprintf(stderr, "Erro ao ler N e W do arquivo de entrada.\n");
+        free(problem);
+        fclose(arquivo);
+        return NULL;
+    }
+
+    // Validação
+    if (problem->n_itens <= 0 || problem->capacidade < 0) {
+        fprintf(stderr, "Número de itens deve ser positivo e capacidade não-negativa. Lidos N=%d, W=%d\n", 
+                problem->n_itens, problem->capacidade);
+        free(problem);
+        fclose(arquivo);
+        return NULL;
+    }
+
+    // Aloca arrays
+    problem->itens = malloc(problem->n_itens * sizeof(Item));
+    problem->solucao_atual = calloc(problem->n_itens, sizeof(int));
+    problem->melhor_solucao = calloc(problem->n_itens, sizeof(int));
+    
+    if (!problem->itens || !problem->solucao_atual || !problem->melhor_solucao) {
+        perror("Falha ao alocar memória para arrays do problema");
+        if (problem->itens) free(problem->itens);
+        if (problem->solucao_atual) free(problem->solucao_atual);
+        if (problem->melhor_solucao) free(problem->melhor_solucao);
+        free(problem);
+        fclose(arquivo);
+        return NULL;
+    }
+
+    // Lê itens
+    for (int i = 0; i < problem->n_itens; i++) {
+        if (fscanf(arquivo, "%d %d", &problem->itens[i].valor, &problem->itens[i].peso) != 2) {
+            fprintf(stderr, "Erro ao ler item %d do arquivo de entrada.\n", i);
+            free(problem->itens);
+            free(problem->solucao_atual);
+            free(problem->melhor_solucao);
+            free(problem);
+            fclose(arquivo);
+            return NULL;
+        }
+        
+        problem->itens[i].indice_original = i;
+        
+        // Calcula razão valor/peso com proteção contra divisão por zero
+        if (problem->itens[i].peso > 0) {
+            problem->itens[i].razao = (double)problem->itens[i].valor / problem->itens[i].peso;
+        } else {
+            // Itens com peso 0 e valor > 0 são ideais
+            problem->itens[i].razao = (problem->itens[i].valor > 0) ? __DBL_MAX__ : 0.0;
+        }
+    }
+    
+    fclose(arquivo);
+    return problem;
+}
+
+/**
+ * @brief Libera toda a memória alocada para um problema da mochila.
+ *
+ * @param problem Ponteiro para o problema a ser liberado
+ */
+static inline void free_knapsack_problem(KnapsackProblem *problem) {
+    if (problem) {
+        if (problem->itens) free(problem->itens);
+        if (problem->solucao_atual) free(problem->solucao_atual);
+        if (problem->melhor_solucao) free(problem->melhor_solucao);
+        free(problem);
+    }
+}
+
+/**
+ * @brief Calcula estatísticas completas de uma solução.
+ *
+ * Verifica a solução e calcula métricas importantes como peso total,
+ * valor total, número de itens selecionados, etc.
+ *
+ * @param itens Array de itens do problema
+ * @param solucao Array binário da solução (1=selecionado, 0=não selecionado)
+ * @param n_itens Número total de itens
+ * @param tempo_ms Tempo de execução em milissegundos
+ * @param nos_explorados Número de nós explorados (opcional, pode ser 0)
+ * @return SolutionStats Estrutura com todas as estatísticas calculadas
+ */
+static inline SolutionStats calculate_solution_stats(const Item *itens, const int *solucao, 
+                                                     int n_itens, double tempo_ms, 
+                                                     long long nos_explorados) {
+    SolutionStats stats;
+    stats.valor_final = 0;
+    stats.peso_total = 0;
+    stats.itens_selecionados = 0;
+    stats.tempo_ms = tempo_ms;
+    stats.nos_explorados = nos_explorados;
+    
+    for (int i = 0; i < n_itens; i++) {
+        if (solucao[i] == 1) {
+            stats.peso_total += itens[i].peso;
+            stats.valor_final += itens[i].valor;
+            stats.itens_selecionados++;
+        }
+    }
+    
+    return stats;
+}
+
+/**
+ * @brief Imprime estatísticas da solução em formato padronizado.
+ *
+ * @param algorithm_name Nome do algoritmo (ex: "SEQUENTIAL", "MPI(4)", etc.)
+ * @param stats Ponteiro para estrutura com estatísticas
+ * @param n_itens Número total de itens do problema
+ * @param capacidade_maxima Capacidade máxima da mochila
+ */
+static inline void print_solution_stats(const char *algorithm_name, const SolutionStats *stats, 
+                                        int n_itens, int capacidade_maxima) {
+    if (stats->nos_explorados > 0) {
+        printf("%s: Valor=%d, Itens=%d/%d, Peso=%d/%d, Nós=%lld, Tempo=%.3fms\n",
+               algorithm_name, stats->valor_final, stats->itens_selecionados, n_itens,
+               stats->peso_total, capacidade_maxima, stats->nos_explorados, stats->tempo_ms);
+    } else {
+        printf("%s: Valor=%d, Itens=%d/%d, Peso=%d/%d, Tempo=%.3fms\n",
+               algorithm_name, stats->valor_final, stats->itens_selecionados, n_itens,
+               stats->peso_total, capacidade_maxima, stats->tempo_ms);
+    }
+}
+
+/**
+ * @brief Calcula tempo decorrido em milissegundos usando struct timespec.
+ *
+ * @param start Tempo de início
+ * @param end Tempo de fim
+ * @return double Tempo decorrido em milissegundos
+ */
+static inline double get_elapsed_time_ms(struct timespec start, struct timespec end) {
+    return (end.tv_sec - start.tv_sec) * 1000.0 + 
+           (end.tv_nsec - start.tv_nsec) / 1000000.0;
 }
 
 #endif // KNAPSACK_COMMON_H
